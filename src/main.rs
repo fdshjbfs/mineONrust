@@ -9,6 +9,9 @@ const WORLD_HEIGHT: i32 = 96;
 const SEA_LEVEL: i32 = 27;
 const RENDER_RADIUS: i32 = 160;
 const REACH: f32 = 7.0;
+const PLAYER_RADIUS: f32 = 0.30;
+const PLAYER_HEIGHT: f32 = 1.80;
+const PLAYER_EYE_HEIGHT: f32 = 1.62;
 
 #[derive(Resource)]
 struct VoxelWorld {
@@ -134,9 +137,11 @@ fn setup(
     });
     commands.spawn((Text::new("+"), TextFont { font_size: 24.0, ..default() }, TextColor(Color::WHITE),
         Node { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Percent(50.0), ..default() }));
-    commands.spawn((DirectionalLight { illuminance: 12_000.0, shadows_enabled: false, ..default() },
+    commands.spawn((DirectionalLight { illuminance: 9_000.0, shadows_enabled: false, color: Color::srgb(1.0, 0.94, 0.82), ..default() },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.1, -0.8, 0.0))));
-    commands.insert_resource(AmbientLight { color: Color::srgb(0.65, 0.75, 0.95), brightness: 0.65 });
+    commands.spawn((DirectionalLight { illuminance: 4_000.0, shadows_enabled: false, color: Color::srgb(0.58, 0.72, 1.0), ..default() },
+        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.45, 2.2, 0.0))));
+    commands.insert_resource(AmbientLight { color: Color::srgb(0.72, 0.82, 1.0), brightness: 0.85 });
 }
 
 fn report_texture_status(
@@ -239,37 +244,42 @@ fn player_move(
         return;
     }
     state.velocity.y -= 22.0 * time.delta_secs();
-    let movement = direction.normalize_or_zero() * 6.0 * time.delta_secs();
+    let movement = direction.normalize_or_zero() * 6.0 * time.delta_secs()
+        + Vec3::Y * state.velocity.y * time.delta_secs();
     move_with_collision(&world, &mut transform.translation, movement, &mut state.velocity);
 }
 
-fn is_solid(world: &VoxelWorld, position: Vec3) -> bool {
-    world.get(position.x.floor() as i32, position.y.floor() as i32, position.z.floor() as i32) != 0
+fn collides(world: &VoxelWorld, eye_position: Vec3) -> bool {
+    let min_x = (eye_position.x - PLAYER_RADIUS).floor() as i32;
+    let max_x = (eye_position.x + PLAYER_RADIUS).floor() as i32;
+    let min_y = (eye_position.y - PLAYER_EYE_HEIGHT).floor() as i32;
+    let max_y = (eye_position.y + (PLAYER_HEIGHT - PLAYER_EYE_HEIGHT)).floor() as i32;
+    let min_z = (eye_position.z - PLAYER_RADIUS).floor() as i32;
+    let max_z = (eye_position.z + PLAYER_RADIUS).floor() as i32;
+    for x in min_x..=max_x { for y in min_y..=max_y { for z in min_z..=max_z {
+        if world.get(x, y, z) != 0 { return true; }
+    }}}
+    false
 }
 
 fn is_grounded(world: &VoxelWorld, position: Vec3) -> bool {
-    is_solid(world, position - Vec3::Y * 1.72)
+    !collides(world, position) && collides(world, position - Vec3::Y * 0.08)
 }
 
 fn move_with_collision(world: &VoxelWorld, position: &mut Vec3, movement: Vec3, velocity: &mut Vec3) {
     for (axis, amount) in [(0, movement.x), (1, movement.y), (2, movement.z)] {
+        if amount.abs() < f32::EPSILON { continue; }
         let mut candidate = *position;
         candidate[axis] += amount;
-        let samples = [
-            candidate + Vec3::new(-0.28, -1.7, -0.28),
-            candidate + Vec3::new(0.28, -1.7, -0.28),
-            candidate + Vec3::new(-0.28, 0.0, 0.28),
-            candidate + Vec3::new(0.28, 0.0, 0.28),
-        ];
-        if samples.iter().all(|sample| !is_solid(world, *sample)) {
+        if !collides(world, candidate) {
             *position = candidate;
         } else if axis == 1 {
             if amount < 0.0 {
-                position.y = (candidate.y - 1.7).floor() + 2.701;
+                position.y = (candidate.y - PLAYER_EYE_HEIGHT).floor() + 1.0 + PLAYER_EYE_HEIGHT + 0.001;
+            } else {
+                position.y = candidate.y.ceil() - (PLAYER_HEIGHT - PLAYER_EYE_HEIGHT) - 0.001;
             }
             *velocity = velocity.with_y(0.0);
-        } else {
-            *velocity = if axis == 0 { velocity.with_x(0.0) } else { velocity.with_z(0.0) };
         }
     }
 }
