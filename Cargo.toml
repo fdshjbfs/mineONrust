@@ -14,6 +14,7 @@ bevy = { version = "0.15", default-features = false, features = [
     "bevy_text",
     "bevy_ui",
     "bevy_winit",
+    "tonemapping_luts",
     "png",
     "jpeg",
     "x11",
