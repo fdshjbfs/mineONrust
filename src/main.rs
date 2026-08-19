@@ -2,7 +2,7 @@ use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::asset::{LoadState, RenderAssetUsages};
-use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy::window::{CursorGrabMode, CursorOptions, MonitorSelection, WindowMode};
 use std::sync::{mpsc, Mutex};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
@@ -145,14 +145,14 @@ fn main() {
             primary_window: Some(Window {
                 title: "mineONrust".into(),
                 resolution: (1280.0_f32, 720.0_f32).into(),
-                cursor_options: CursorOptions { grab_mode: CursorGrabMode::Confined, visible: false, ..default() },
+                cursor_options: CursorOptions { grab_mode: CursorGrabMode::None, visible: true, ..default() },
                 present_mode: bevy::window::PresentMode::AutoVsync,
                 ..default()
             }),
             ..default()
         }))
         .add_systems(Startup, setup)
-        .add_systems(Update, (report_texture_status, mouse_look, player_move, hotbar_input, block_interaction, update_hotbar, update_mining_ui, update_particles, poll_mesh_rebuilds).chain())
+        .add_systems(Update, (report_texture_status, window_controls, mouse_look, player_move, hotbar_input, block_interaction, update_hotbar, update_mining_ui, update_particles, poll_mesh_rebuilds).chain())
         .run();
 }
 
@@ -180,6 +180,7 @@ fn setup(
 
     let spawn_height = terrain_height(WORLD_SIZE / 2, WORLD_SIZE / 2) + 3;
     let camera = commands.spawn((Camera3d::default(), Projection::Perspective(PerspectiveProjection { far: 220.0, ..default() }), Player, Transform::from_xyz(WORLD_SIZE as f32 / 2.0, spawn_height as f32, WORLD_SIZE as f32 / 2.0))).id();
+    commands.spawn(Camera2d);
     commands.entity(camera).with_children(|parent| {
         parent.spawn((Mesh3d(meshes.add(Cuboid::new(0.20, 0.20, 0.55))), MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.73, 0.42, 0.25), perceptual_roughness: 0.9, ..default()
@@ -264,7 +265,40 @@ fn build_mesh(world: &VoxelWorld, group: FaceGroup) -> Mesh {
     mesh
 }
 
-fn mouse_look(mut motion: EventReader<MouseMotion>, mut look: ResMut<LookState>, mut query: Query<&mut Transform, With<Player>>) {
+fn window_controls(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut windows: Query<&mut Window>,
+) {
+    let Ok(mut window) = windows.get_single_mut() else { return; };
+    if keys.just_pressed(KeyCode::F11) {
+        window.mode = match window.mode {
+            WindowMode::Windowed => WindowMode::BorderlessFullscreen(MonitorSelection::Current),
+            _ => WindowMode::Windowed,
+        };
+    }
+    if mouse.just_pressed(MouseButton::Left) {
+        window.cursor_options.grab_mode = CursorGrabMode::Locked;
+        window.cursor_options.visible = false;
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        window.cursor_options.grab_mode = CursorGrabMode::None;
+        window.cursor_options.visible = true;
+    }
+    if !window.focused {
+        window.cursor_options.grab_mode = CursorGrabMode::None;
+        window.cursor_options.visible = true;
+    }
+}
+
+fn mouse_look(
+    mut motion: EventReader<MouseMotion>,
+    mut look: ResMut<LookState>,
+    windows: Query<&Window>,
+    mut query: Query<&mut Transform, With<Player>>,
+) {
+    let Ok(window) = windows.get_single() else { return; };
+    if window.cursor_options.grab_mode != CursorGrabMode::Locked { return; }
     let Ok(mut transform) = query.get_single_mut() else { return; };
     let mut delta = Vec2::ZERO;
     for event in motion.read() { delta += event.delta; }
