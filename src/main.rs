@@ -180,7 +180,7 @@ fn setup(
 
     let spawn_height = terrain_height(WORLD_SIZE / 2, WORLD_SIZE / 2) + 3;
     let camera = commands.spawn((Camera3d::default(), Projection::Perspective(PerspectiveProjection { far: 220.0, ..default() }), Player, Transform::from_xyz(WORLD_SIZE as f32 / 2.0, spawn_height as f32, WORLD_SIZE as f32 / 2.0))).id();
-    commands.spawn(Camera2d);
+    commands.spawn((Camera2d, Camera { order: 1, ..default() }));
     commands.entity(camera).with_children(|parent| {
         parent.spawn((Mesh3d(meshes.add(Cuboid::new(0.20, 0.20, 0.55))), MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.73, 0.42, 0.25), perceptual_roughness: 0.9, ..default()
