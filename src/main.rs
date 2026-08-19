@@ -6,6 +6,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, MonitorSelection, WindowMode};
 use std::sync::{mpsc, Mutex};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const WORLD_SIZE: i32 = 512;
 const WORLD_HEIGHT: i32 = 96;
@@ -23,16 +24,21 @@ const STONE: u8 = 4;
 #[derive(Resource)]
 struct VoxelWorld {
     blocks: Vec<u8>,
+    seed: i64,
 }
 
 impl VoxelWorld {
     fn new() -> Self {
+        let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_nanos() as i64).unwrap_or(42);
         let mut blocks = vec![0; (WORLD_SIZE * WORLD_HEIGHT * WORLD_SIZE) as usize];
         for x in 0..WORLD_SIZE {
             for z in 0..WORLD_SIZE {
-                let height = terrain_height(x, z);
+                let height = terrain_height(seed, x, z);
                 for y in 0..=height {
-                    let is_cave = y > 7 && y < height - 4 && cave_value(x, y, z) > 0.72;
+                    let cave_strength = cave_value(seed, x, y, z);
+                    let underground_cave = y > 7 && y < height - 4 && cave_strength > 0.76;
+                    let surface_opening = y >= height - 2 && cave_strength > 0.91 && hash(seed, x + 41, z - 17) > 0.72;
+                    let is_cave = underground_cave || surface_opening;
                     if !is_cave {
                         let mountain_surface = height > SEA_LEVEL + 24;
                         set_block(&mut blocks, x, y, z, if y == height && !mountain_surface { GRASS } else if y > height - 4 && !mountain_surface { DIRT } else { STONE });
@@ -40,7 +46,7 @@ impl VoxelWorld {
                 }
             }
         }
-        Self { blocks }
+        Self { blocks, seed }
     }
 
     fn get(&self, x: i32, y: i32, z: i32) -> u8 {
@@ -110,26 +116,31 @@ fn set_block(blocks: &mut [u8], x: i32, y: i32, z: i32, value: u8) {
     blocks[index(x, y, z)] = value;
 }
 
-fn hash(x: i32, z: i32) -> f32 {
-    let mut value = (x as i64).wrapping_mul(374_761_393).wrapping_add((z as i64).wrapping_mul(668_265_263));
+fn hash(seed: i64, x: i32, z: i32) -> f32 {
+    let mut value = seed.wrapping_add((x as i64).wrapping_mul(374_761_393)).wrapping_add((z as i64).wrapping_mul(668_265_263));
     value = (value ^ (value >> 13)).wrapping_mul(1_274_126_177);
     ((value ^ (value >> 16)) & 0xffff) as f32 / 65_535.0
 }
 
-fn cave_value(x: i32, y: i32, z: i32) -> f32 {
-    let a = ((x as f32 * 0.075).sin() + (z as f32 * 0.081).cos() + (y as f32 * 0.13).sin()) / 3.0;
-    let b = hash(x + y * 17, z - y * 31);
-    (a.abs() * 0.55 + b * 0.45).clamp(0.0, 1.0)
+fn cave_value(seed: i64, x: i32, y: i32, z: i32) -> f32 {
+    let tunnel = ((x as f32 * 0.045).sin() + (z as f32 * 0.052).cos() + (y as f32 * 0.11).sin()).abs() / 3.0;
+    let chamber = ((x as f32 * 0.021).sin() * (z as f32 * 0.025).cos() * (y as f32 * 0.07).sin()).abs();
+    let noise = hash(seed, x / 2 + y * 13, z / 2 - y * 19);
+    (tunnel * 0.35 + chamber * 0.45 + noise * 0.20).clamp(0.0, 1.0)
 }
 
-fn terrain_height(x: i32, z: i32) -> i32 {
-    let region = hash(x / 96, z / 96);
-    let broad = ((x as f32 * 0.004).sin() + (z as f32 * 0.005).cos()) * 2.5;
-    let hills = (x as f32 * 0.018).sin() * (z as f32 * 0.016).cos() * 3.0;
-    let mountain_noise = ((x as f32 * 0.009).sin() - (z as f32 * 0.011).cos()).abs();
-    let mountains = if region > 0.66 { mountain_noise.powf(1.7) * 28.0 } else { 0.0 };
-    let detail = (hash(x / 8, z / 8) - 0.5) * 1.8;
-    (SEA_LEVEL + 8 + broad as i32 + hills as i32 + mountains as i32 + detail as i32).clamp(4, WORLD_HEIGHT - 4)
+fn terrain_height(seed: i64, x: i32, z: i32) -> i32 {
+    let continental = (((x as f32 + (seed & 255) as f32) * 0.0035).sin() + ((z as f32 + ((seed >> 8) & 255) as f32) * 0.0042).cos()) * 2.0;
+    let rolling_hills = (x as f32 * 0.012).sin() * (z as f32 * 0.014).cos() * 3.5;
+    let mountain_region = hash(seed, x / 128, z / 128);
+    let ridge = ((x as f32 * 0.006).sin() + (z as f32 * 0.007).cos()).abs();
+    let mountain_noise = ((x as f32 * 0.017).sin() * (z as f32 * 0.013).cos()).abs();
+    let mountains = if mountain_region > 0.56 {
+        let shape = (ridge * 0.72 + mountain_noise * 0.28).powf(2.2);
+        shape * 35.0
+    } else { 0.0 };
+    let detail = (hash(seed, x / 6, z / 6) - 0.5) * 1.2;
+    (SEA_LEVEL + 8 + continental as i32 + rolling_hills as i32 + mountains as i32 + detail as i32).clamp(4, WORLD_HEIGHT - 4)
 }
 
 fn main() {
@@ -178,7 +189,7 @@ fn setup(
         commands.spawn((Mesh3d(meshes.add(build_mesh(&world, group))), MeshMaterial3d(material), WorldMesh, group));
     }
 
-    let spawn_height = terrain_height(WORLD_SIZE / 2, WORLD_SIZE / 2) + 3;
+    let spawn_height = terrain_height(world.seed, WORLD_SIZE / 2, WORLD_SIZE / 2) + 3;
     let camera = commands.spawn((Camera3d::default(), Projection::Perspective(PerspectiveProjection { far: 220.0, ..default() }), Player, Transform::from_xyz(WORLD_SIZE as f32 / 2.0, spawn_height as f32, WORLD_SIZE as f32 / 2.0))).id();
     commands.spawn((Camera2d, Camera { order: 1, clear_color: ClearColorConfig::None, ..default() }));
     commands.entity(camera).with_children(|parent| {
@@ -186,8 +197,8 @@ fn setup(
             base_color: Color::srgb(0.73, 0.42, 0.25), perceptual_roughness: 0.9, ..default()
         })), Transform::from_xyz(0.42, -0.34, -0.72)));
         let crosshair_material = materials.add(StandardMaterial { base_color: Color::WHITE, unlit: true, ..default() });
-        parent.spawn((Mesh3d(meshes.add(Cuboid::new(0.012, 0.12, 0.012))), MeshMaterial3d(crosshair_material.clone()), Transform::from_xyz(0.0, 0.0, -0.75)));
-        parent.spawn((Mesh3d(meshes.add(Cuboid::new(0.12, 0.012, 0.012))), MeshMaterial3d(crosshair_material), Transform::from_xyz(0.0, 0.0, -0.75)));
+        parent.spawn((Mesh3d(meshes.add(Cuboid::new(0.003, 0.035, 0.003))), MeshMaterial3d(crosshair_material.clone()), Transform::from_xyz(0.0, 0.0, -0.75)));
+        parent.spawn((Mesh3d(meshes.add(Cuboid::new(0.035, 0.003, 0.003))), MeshMaterial3d(crosshair_material), Transform::from_xyz(0.0, 0.0, -0.75)));
     });
         commands.spawn((Text::new("+"), TextFont { font_size: 18.0, ..default() }, TextColor(Color::WHITE),
             Node { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Percent(50.0), margin: UiRect::new(Val::Px(-4.0), Val::Auto, Val::Px(-9.0), Val::Auto), ..default() }));
@@ -509,7 +520,7 @@ fn queue_mesh_rebuild(world: &VoxelWorld, queue: &mut MeshRebuildQueue) {
     let blocks = world.blocks.clone();
     let sender = queue.sender.clone();
     thread::spawn(move || {
-        let background_world = VoxelWorld { blocks };
+        let background_world = VoxelWorld { blocks, seed: 0 };
         let result = [
             build_mesh(&background_world, FaceGroup::GrassTop),
             build_mesh(&background_world, FaceGroup::GrassSide),
