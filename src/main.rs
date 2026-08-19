@@ -1,4 +1,4 @@
-use bevy::input::mouse::MouseMotion;
+use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::asset::{LoadState, RenderAssetUsages};
@@ -13,6 +13,10 @@ const PLAYER_RADIUS: f32 = 0.30;
 const PLAYER_HEIGHT: f32 = 1.80;
 const PLAYER_EYE_HEIGHT: f32 = 1.62;
 
+const GRASS: u8 = 2;
+const DIRT: u8 = 3;
+const STONE: u8 = 4;
+
 #[derive(Resource)]
 struct VoxelWorld {
     blocks: Vec<u8>,
@@ -25,8 +29,8 @@ impl VoxelWorld {
             for z in 0..WORLD_SIZE {
                 let height = terrain_height(x, z);
                 for y in 0..=height {
-                    let block = if y == height { 2 } else if y > height - 4 { 3 } else { 1 };
-                    set_block(&mut blocks, x, y, z, block);
+                    let is_cave = y > 7 && y < height - 4 && cave_value(x, y, z) > 0.72;
+                    if !is_cave { set_block(&mut blocks, x, y, z, if y == height { GRASS } else if y > height - 4 { DIRT } else { STONE }); }
                 }
             }
         }
@@ -46,13 +50,14 @@ struct Player;
 struct WorldMesh;
 
 #[derive(Component, Clone, Copy, PartialEq)]
-enum FaceGroup { Top, Side, Bottom }
+enum FaceGroup { GrassTop, GrassSide, Dirt, Stone }
 
 #[derive(Resource)]
 struct TextureHandles {
     top: Handle<Image>,
     side: Handle<Image>,
     bottom: Handle<Image>,
+    stone: Handle<Image>,
     reported: bool,
 }
 
@@ -65,6 +70,18 @@ struct PlayerState {
     velocity: Vec3,
     last_space: f32,
 }
+
+#[derive(Resource)]
+struct Inventory {
+    slots: [u32; 9],
+    selected: usize,
+}
+
+#[derive(Resource, Default)]
+struct MiningState { target: Option<IVec3>, progress: f32 }
+
+#[derive(Component)]
+struct Hotbar;
 
 fn index(x: i32, y: i32, z: i32) -> usize {
     ((y * WORLD_SIZE + z) * WORLD_SIZE + x) as usize
@@ -80,11 +97,18 @@ fn hash(x: i32, z: i32) -> f32 {
     ((value ^ (value >> 16)) & 0xffff) as f32 / 65_535.0
 }
 
+fn cave_value(x: i32, y: i32, z: i32) -> f32 {
+    let a = ((x as f32 * 0.075).sin() + (z as f32 * 0.081).cos() + (y as f32 * 0.13).sin()) / 3.0;
+    let b = hash(x + y * 17, z - y * 31);
+    (a.abs() * 0.55 + b * 0.45).clamp(0.0, 1.0)
+}
+
 fn terrain_height(x: i32, z: i32) -> i32 {
-    let broad = ((x as f32 * 0.010).sin() + (z as f32 * 0.012).cos()) * 7.0;
-    let hills = ((x as f32 * 0.035).sin() * (z as f32 * 0.029).cos()) * 5.0;
-    let detail = (hash(x / 4, z / 4) - 0.5) * 5.0;
-    (SEA_LEVEL + 9 + broad as i32 + hills as i32 + detail as i32).clamp(4, WORLD_HEIGHT - 4)
+    let continental = ((x as f32 * 0.006).sin() + (z as f32 * 0.007).cos()) * 9.0;
+    let hills = (x as f32 * 0.022).sin() * (z as f32 * 0.019).cos() * 13.0;
+    let ridge = ((x as f32 * 0.014).sin() - (z as f32 * 0.017).cos()).abs() * 19.0;
+    let detail = (hash(x / 3, z / 3) - 0.5) * 4.0;
+    (SEA_LEVEL + 8 + continental as i32 + hills as i32 + ridge as i32 + detail as i32).clamp(4, WORLD_HEIGHT - 4)
 }
 
 fn main() {
@@ -92,6 +116,8 @@ fn main() {
         .insert_resource(VoxelWorld::new())
         .insert_resource(LookState::default())
         .insert_resource(PlayerState { flying: false, velocity: Vec3::ZERO, last_space: -10.0 })
+        .insert_resource(Inventory { slots: [16, 0, 0, 0, 0, 0, 0, 0, 0], selected: 0 })
+        .insert_resource(MiningState::default())
         .insert_resource(ClearColor(Color::srgb(0.34, 0.66, 0.94)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -104,7 +130,7 @@ fn main() {
             ..default()
         }))
         .add_systems(Startup, setup)
-        .add_systems(Update, (report_texture_status, mouse_look, player_move, block_interaction).chain())
+        .add_systems(Update, (report_texture_status, mouse_look, player_move, hotbar_input, block_interaction, update_hotbar).chain())
         .run();
 }
 
@@ -118,13 +144,15 @@ fn setup(
     let top = materials.add(StandardMaterial { base_color_texture: Some(asset_server.load("grass_top.jpg")), perceptual_roughness: 1.0, ..default() });
     let side = materials.add(StandardMaterial { base_color_texture: Some(asset_server.load("grass_side.png")), perceptual_roughness: 1.0, ..default() });
     let bottom = materials.add(StandardMaterial { base_color_texture: Some(asset_server.load("dirt_bottom.png")), perceptual_roughness: 1.0, ..default() });
+    let stone = materials.add(StandardMaterial { base_color_texture: Some(asset_server.load("stone.jpg")), perceptual_roughness: 1.0, ..default() });
     commands.insert_resource(TextureHandles {
         top: asset_server.load("grass_top.jpg"),
         side: asset_server.load("grass_side.png"),
         bottom: asset_server.load("dirt_bottom.png"),
+        stone: asset_server.load("stone.jpg"),
         reported: false,
     });
-    for (group, material) in [(FaceGroup::Top, top), (FaceGroup::Side, side), (FaceGroup::Bottom, bottom)] {
+    for (group, material) in [(FaceGroup::GrassTop, top), (FaceGroup::GrassSide, side), (FaceGroup::Dirt, bottom), (FaceGroup::Stone, stone)] {
         commands.spawn((Mesh3d(meshes.add(build_mesh(&world, group))), MeshMaterial3d(material), WorldMesh, group));
     }
 
@@ -137,6 +165,8 @@ fn setup(
     });
     commands.spawn((Text::new("+"), TextFont { font_size: 24.0, ..default() }, TextColor(Color::WHITE),
         Node { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Percent(50.0), ..default() }));
+    commands.spawn((Text::new("1 DIRT  2 STONE"), TextFont { font_size: 20.0, ..default() }, TextColor(Color::WHITE), Hotbar,
+        Node { position_type: PositionType::Absolute, left: Val::Percent(42.0), bottom: Val::Px(24.0), ..default() }));
     commands.spawn((DirectionalLight { illuminance: 9_000.0, shadows_enabled: false, color: Color::srgb(1.0, 0.94, 0.82), ..default() },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.1, -0.8, 0.0))));
     commands.spawn((DirectionalLight { illuminance: 4_000.0, shadows_enabled: false, color: Color::srgb(0.58, 0.72, 1.0), ..default() },
@@ -150,7 +180,7 @@ fn report_texture_status(
 ) {
     let Some(handles) = handles.as_deref_mut() else { return; };
     if handles.reported { return; }
-    let textures = [("grass_top.jpg", &handles.top), ("grass_side.png", &handles.side), ("dirt_bottom.png", &handles.bottom)];
+    let textures = [("grass_top.jpg", &handles.top), ("grass_side.png", &handles.side), ("dirt_bottom.png", &handles.bottom), ("stone.jpg", &handles.stone)];
     let states: Vec<_> = textures.iter().map(|(_, handle)| server.get_load_state(handle.id())).collect();
     if states.iter().all(|state| matches!(state, Some(LoadState::Loaded))) {
         info!("All terrain textures loaded successfully");
@@ -184,13 +214,20 @@ fn build_mesh(world: &VoxelWorld, group: FaceGroup) -> Mesh {
         if world.get(x, y, z) == 0 { continue; }
         for (normal, corners) in faces {
             if world.get(x + normal[0], y + normal[1], z + normal[2]) != 0 { continue; }
-            let face_group = if normal[1] > 0 { FaceGroup::Top } else if normal[1] < 0 { FaceGroup::Bottom } else { FaceGroup::Side };
+            let block_group = match world.get(x, y, z) {
+                GRASS if normal[1] > 0 => FaceGroup::GrassTop,
+                GRASS => FaceGroup::GrassSide,
+                DIRT => FaceGroup::Dirt,
+                STONE => FaceGroup::Stone,
+                _ => continue,
+            };
+            let face_group = block_group;
             if std::mem::discriminant(&face_group) != std::mem::discriminant(&group) { continue; }
             let base = positions.len() as u32;
-            for (corner, uv) in corners.into_iter().zip([[0.,0.],[0.,1.],[1.,1.],[1.,0.]]) {
+            for (corner, uv) in corners.into_iter().zip([[0.01,0.01],[0.01,0.99],[0.99,0.99],[0.99,0.01]]) {
                 positions.push([x as f32 + corner[0], y as f32 + corner[1], z as f32 + corner[2]]);
                 normals.push([normal[0] as f32, normal[1] as f32, normal[2] as f32]);
-                uvs.push(if group == FaceGroup::Side { [uv[0], 1.0 - uv[1]] } else { uv });
+                uvs.push(if group == FaceGroup::GrassSide { [uv[0], 1.0 - uv[1]] } else { uv });
             }
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
@@ -284,41 +321,101 @@ fn move_with_collision(world: &VoxelWorld, position: &mut Vec3, movement: Vec3, 
     }
 }
 
+fn hotbar_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut wheel: EventReader<MouseWheel>,
+    mut inventory: ResMut<Inventory>,
+) {
+    for key in [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7, KeyCode::Digit8, KeyCode::Digit9] {
+        if keys.just_pressed(key) {
+            inventory.selected = match key {
+                KeyCode::Digit1 => 0, KeyCode::Digit2 => 1, KeyCode::Digit3 => 2,
+                KeyCode::Digit4 => 3, KeyCode::Digit5 => 4, KeyCode::Digit6 => 5,
+                KeyCode::Digit7 => 6, KeyCode::Digit8 => 7, KeyCode::Digit9 => 8, _ => 0,
+            };
+        }
+    }
+    for event in wheel.read() {
+        if event.y > 0.0 { inventory.selected = (inventory.selected + 8) % 9; }
+        if event.y < 0.0 { inventory.selected = (inventory.selected + 1) % 9; }
+    }
+}
+
+fn update_hotbar(inventory: Res<Inventory>, mut query: Query<&mut Text, With<Hotbar>>) {
+    if !inventory.is_changed() { return; }
+    let labels: Vec<String> = inventory.slots.iter().enumerate().map(|(index, count)| {
+        let marker = if index == inventory.selected { "[" } else { " " };
+        let close = if index == inventory.selected { "]" } else { " " };
+        format!("{marker}{}:{}{close}", index + 1, count)
+    }).collect();
+    for mut text in &mut query { *text = Text::new(labels.join(" ")); }
+}
+
 fn block_interaction(
     mouse: Res<ButtonInput<MouseButton>>,
     camera: Query<&GlobalTransform, With<Player>>,
     mut world: ResMut<VoxelWorld>,
+    mut inventory: ResMut<Inventory>,
+    mut mining: ResMut<MiningState>,
+    time: Res<Time>,
     mut meshes: ResMut<Assets<Mesh>>,
     mesh_query: Query<(&Mesh3d, &FaceGroup), With<WorldMesh>>,
 ) {
-    if !(mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right)) { return; }
     let Ok(transform) = camera.get_single() else { return; };
     let origin = transform.translation();
     let direction = transform.forward();
     let mut point = origin;
     let mut previous = origin;
+    let mut hit = None;
     for _ in 0..(REACH as usize * 20) {
         point += direction * 0.05;
         let cell = point.floor().as_ivec3();
         if world.get(cell.x, cell.y, cell.z) != 0 {
-            let target = if mouse.pressed(MouseButton::Right) { previous.floor().as_ivec3() } else { cell };
-            if target.x >= 0 && target.y >= 0 && target.z >= 0 && target.x < WORLD_SIZE && target.y < WORLD_HEIGHT && target.z < WORLD_SIZE {
-                let target_index = index(target.x, target.y, target.z);
-                if mouse.pressed(MouseButton::Right) && world.blocks[target_index] == 0 {
-                    world.blocks[target_index] = 1;
-                } else if mouse.pressed(MouseButton::Left) {
-                    world.blocks[target_index] = 0;
-                } else {
-                    break;
-                }
-                for (handle, group) in mesh_query.iter() {
-                    if let Some(mesh) = meshes.get_mut(&handle.0) {
-                        *mesh = build_mesh(&world, *group);
-                    }
-                }
-            }
+            hit = Some((cell, previous.floor().as_ivec3()));
             break;
         }
         previous = point;
+    }
+    if mouse.just_pressed(MouseButton::Right) {
+        if let Some((_, place)) = hit {
+            let selected_block = if inventory.selected == 0 { DIRT } else if inventory.selected == 1 { STONE } else { 0 };
+            if selected_block != 0 && inventory.slots[inventory.selected] > 0 && place.x >= 0 && place.y >= 0 && place.z >= 0 && place.x < WORLD_SIZE && place.y < WORLD_HEIGHT && place.z < WORLD_SIZE && world.get(place.x, place.y, place.z) == 0 {
+                world.blocks[index(place.x, place.y, place.z)] = selected_block;
+                let selected_slot = inventory.selected;
+                inventory.slots[selected_slot] -= 1;
+                rebuild_meshes(&world, &mut meshes, &mesh_query);
+            }
+        }
+        return;
+    }
+    if !mouse.pressed(MouseButton::Left) {
+        mining.target = None;
+        mining.progress = 0.0;
+        return;
+    }
+    let Some((target, _)) = hit else { mining.target = None; mining.progress = 0.0; return; };
+    if mining.target != Some(target) { mining.target = Some(target); mining.progress = 0.0; }
+    let block = world.get(target.x, target.y, target.z);
+    let break_time = if block == STONE { 2.2 } else { 0.28 };
+    mining.progress += time.delta_secs() / break_time;
+    if mining.progress >= 1.0 {
+        world.blocks[index(target.x, target.y, target.z)] = 0;
+        if block != STONE {
+            let slot = if inventory.selected == 0 { 0 } else { 0 };
+            inventory.slots[slot] = inventory.slots[slot].saturating_add(1);
+        }
+        mining.target = None;
+        mining.progress = 0.0;
+        rebuild_meshes(&world, &mut meshes, &mesh_query);
+    }
+}
+
+fn rebuild_meshes(
+    world: &VoxelWorld,
+    meshes: &mut Assets<Mesh>,
+    mesh_query: &Query<(&Mesh3d, &FaceGroup), With<WorldMesh>>,
+) {
+    for (handle, group) in mesh_query.iter() {
+        if let Some(mesh) = meshes.get_mut(&handle.0) { *mesh = build_mesh(world, *group); }
     }
 }
