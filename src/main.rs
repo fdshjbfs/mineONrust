@@ -180,11 +180,14 @@ fn setup(
 
     let spawn_height = terrain_height(WORLD_SIZE / 2, WORLD_SIZE / 2) + 3;
     let camera = commands.spawn((Camera3d::default(), Projection::Perspective(PerspectiveProjection { far: 220.0, ..default() }), Player, Transform::from_xyz(WORLD_SIZE as f32 / 2.0, spawn_height as f32, WORLD_SIZE as f32 / 2.0))).id();
-    commands.spawn((Camera2d, Camera { order: 1, ..default() }));
+    commands.spawn((Camera2d, Camera { order: 1, clear_color: ClearColorConfig::None, ..default() }));
     commands.entity(camera).with_children(|parent| {
         parent.spawn((Mesh3d(meshes.add(Cuboid::new(0.20, 0.20, 0.55))), MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.73, 0.42, 0.25), perceptual_roughness: 0.9, ..default()
         })), Transform::from_xyz(0.42, -0.34, -0.72)));
+        let crosshair_material = materials.add(StandardMaterial { base_color: Color::WHITE, unlit: true, ..default() });
+        parent.spawn((Mesh3d(meshes.add(Cuboid::new(0.012, 0.12, 0.012))), MeshMaterial3d(crosshair_material.clone()), Transform::from_xyz(0.0, 0.0, -0.75)));
+        parent.spawn((Mesh3d(meshes.add(Cuboid::new(0.12, 0.012, 0.012))), MeshMaterial3d(crosshair_material), Transform::from_xyz(0.0, 0.0, -0.75)));
     });
         commands.spawn((Text::new("+"), TextFont { font_size: 18.0, ..default() }, TextColor(Color::WHITE),
             Node { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Percent(50.0), margin: UiRect::new(Val::Px(-4.0), Val::Auto, Val::Px(-9.0), Val::Auto), ..default() }));
