@@ -177,7 +177,7 @@ fn setup(
 ) {
     commands.spawn((AudioPlayer::new(asset_server.load("mice_on_venus.mp3")), PlaybackSettings {
         mode: bevy::audio::PlaybackMode::Loop,
-        volume: bevy::audio::Volume::Linear(0.28),
+        volume: bevy::audio::Volume::new(0.28),
         ..default()
     }));
     let top = materials.add(StandardMaterial { base_color_texture: Some(asset_server.load("grass_top.jpg")), perceptual_roughness: 1.0, ..default() });
