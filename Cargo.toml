@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 bevy = { version = "0.15", default-features = false, features = [
     "bevy_asset",
+    "bevy_audio",
     "bevy_core_pipeline",
     "bevy_pbr",
     "bevy_render",
@@ -17,6 +18,7 @@ bevy = { version = "0.15", default-features = false, features = [
     "tonemapping_luts",
     "png",
     "jpeg",
+    "mp3",
     "x11",
 ] }
 

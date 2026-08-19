@@ -15,7 +15,7 @@ cargo run --release
 На CachyOS перед первой сборкой:
 
 ```bash
-sudo pacman -S --needed base-devel pkgconf libx11 libxcursor libxrandr libxi libxinerama libxkbcommon
+sudo pacman -S --needed base-devel pkgconf alsa-lib libx11 libxcursor libxrandr libxi libxinerama libxkbcommon
 rustup default stable
 ```
 
@@ -29,6 +29,7 @@ rustup default stable
 - отдельные GPU-материалы для верхней, боковой и нижней граней;
 - пользовательские текстуры в `assets/grass_top.jpg`, `assets/grass_side.png` и `assets/dirt_bottom.png`;
 - камень из `assets/stone.jpg` на всех гранях; UV имеют небольшой внутренний отступ, чтобы убрать белую рамку исходной картинки;
+- фоновая музыка `assets/mice_on_venus.mp3`, зацикленная на умеренной громкости;
 - голубое небо, освещение, прицел и рука от первого лица;
 - каменные слои под землёй и процедурные пещеры;
 - земля ломается быстро и попадает в слот 1, камень ломается медленно и пока не выпадает;
