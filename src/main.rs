@@ -1,7 +1,7 @@
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
-use bevy::asset::RenderAssetUsages;
+use bevy::asset::{LoadState, RenderAssetUsages};
 use bevy::window::{CursorGrabMode, CursorOptions};
 
 const WORLD_SIZE: i32 = 512;
@@ -44,6 +44,14 @@ struct WorldMesh;
 #[derive(Component, Clone, Copy, PartialEq)]
 enum FaceGroup { Top, Side, Bottom }
 
+#[derive(Resource)]
+struct TextureHandles {
+    top: Handle<Image>,
+    side: Handle<Image>,
+    bottom: Handle<Image>,
+    reported: bool,
+}
+
 #[derive(Resource, Default)]
 struct LookState { pitch: f32, yaw: f32 }
 
@@ -83,7 +91,7 @@ fn main() {
             ..default()
         }))
         .add_systems(Startup, setup)
-        .add_systems(Update, (mouse_look, player_move, block_interaction).chain())
+        .add_systems(Update, (report_texture_status, mouse_look, player_move, block_interaction).chain())
         .run();
 }
 
@@ -97,6 +105,12 @@ fn setup(
     let top = materials.add(StandardMaterial { base_color_texture: Some(asset_server.load("grass_top.jpg")), perceptual_roughness: 1.0, ..default() });
     let side = materials.add(StandardMaterial { base_color_texture: Some(asset_server.load("grass_side.png")), perceptual_roughness: 1.0, ..default() });
     let bottom = materials.add(StandardMaterial { base_color_texture: Some(asset_server.load("dirt_bottom.png")), perceptual_roughness: 1.0, ..default() });
+    commands.insert_resource(TextureHandles {
+        top: asset_server.load("grass_top.jpg"),
+        side: asset_server.load("grass_side.png"),
+        bottom: asset_server.load("dirt_bottom.png"),
+        reported: false,
+    });
     for (group, material) in [(FaceGroup::Top, top), (FaceGroup::Side, side), (FaceGroup::Bottom, bottom)] {
         commands.spawn((Mesh3d(meshes.add(build_mesh(&world, group))), MeshMaterial3d(material), WorldMesh, group));
     }
@@ -113,6 +127,27 @@ fn setup(
     commands.spawn((DirectionalLight { illuminance: 12_000.0, shadows_enabled: true, ..default() },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.1, -0.8, 0.0))));
     commands.insert_resource(AmbientLight { color: Color::srgb(0.65, 0.75, 0.95), brightness: 0.65 });
+}
+
+fn report_texture_status(
+    mut handles: Option<ResMut<TextureHandles>>,
+    server: Res<AssetServer>,
+) {
+    let Some(handles) = handles.as_deref_mut() else { return; };
+    if handles.reported { return; }
+    let textures = [("grass_top.jpg", &handles.top), ("grass_side.png", &handles.side), ("dirt_bottom.png", &handles.bottom)];
+    let states: Vec<_> = textures.iter().map(|(_, handle)| server.get_load_state(handle.id())).collect();
+    if states.iter().all(|state| matches!(state, Some(LoadState::Loaded))) {
+        info!("All terrain textures loaded successfully");
+        handles.reported = true;
+    } else if states.iter().any(|state| matches!(state, Some(LoadState::Failed(_)))) {
+        for ((name, _), state) in textures.iter().zip(states) {
+            if matches!(state, Some(LoadState::Failed(_))) {
+                error!("Texture failed to load: {name}. Run cargo from the project root.");
+            }
+        }
+        handles.reported = true;
+    }
 }
 
 fn build_mesh(world: &VoxelWorld, group: FaceGroup) -> Mesh {
