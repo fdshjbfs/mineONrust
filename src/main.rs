@@ -26,6 +26,7 @@ const STONE: u8 = 4;
 struct VoxelWorld {
     blocks: Vec<u8>,
     seed: i64,
+    revision: u64,
 }
 
 impl VoxelWorld {
@@ -47,7 +48,7 @@ impl VoxelWorld {
                 }
             }
         }
-        Self { blocks, seed }
+        Self { blocks, seed, revision: 0 }
     }
 
     fn get(&self, x: i32, y: i32, z: i32) -> u8 {
@@ -104,8 +105,8 @@ struct BreakParticle { velocity: Vec3, lifetime: f32 }
 
 #[derive(Resource)]
 struct MeshRebuildQueue {
-    sender: Sender<[Mesh; 4]>,
-    receiver: Mutex<Receiver<[Mesh; 4]>>,
+    sender: Sender<(u64, [Mesh; 4])>,
+    receiver: Mutex<Receiver<(u64, [Mesh; 4])>>,
     running: bool,
 }
 
@@ -489,6 +490,7 @@ fn block_interaction(
             let selected_block = if inventory.selected == 0 { DIRT } else if inventory.selected == 1 { STONE } else { 0 };
             if selected_block != 0 && inventory.slots[inventory.selected] > 0 && place.x >= 0 && place.y >= 0 && place.z >= 0 && place.x < WORLD_SIZE && place.y < WORLD_HEIGHT && place.z < WORLD_SIZE && world.get(place.x, place.y, place.z) == 0 {
                 world.blocks[index(place.x, place.y, place.z)] = selected_block;
+                world.revision = world.revision.wrapping_add(1);
                 let selected_slot = inventory.selected;
                 inventory.slots[selected_slot] -= 1;
                 queue_mesh_rebuild(&world, &mut rebuild_queue);
@@ -508,6 +510,7 @@ fn block_interaction(
     mining.progress += time.delta_secs() / break_time;
     if mining.progress >= 1.0 {
         world.blocks[index(target.x, target.y, target.z)] = 0;
+        world.revision = world.revision.wrapping_add(1);
         if block != STONE {
             let slot = if inventory.selected == 0 { 0 } else { 0 };
             inventory.slots[slot] = inventory.slots[slot].saturating_add(1);
@@ -529,25 +532,32 @@ fn queue_mesh_rebuild(world: &VoxelWorld, queue: &mut MeshRebuildQueue) {
     if queue.running { return; }
     queue.running = true;
     let blocks = world.blocks.clone();
+    let revision = world.revision;
     let sender = queue.sender.clone();
     thread::spawn(move || {
-        let background_world = VoxelWorld { blocks, seed: 0 };
+        let background_world = VoxelWorld { blocks, seed: 0, revision };
         let result = [
             build_mesh(&background_world, FaceGroup::GrassTop),
             build_mesh(&background_world, FaceGroup::GrassSide),
             build_mesh(&background_world, FaceGroup::Dirt),
             build_mesh(&background_world, FaceGroup::Stone),
         ];
-        let _ = sender.send(result);
+        let _ = sender.send((revision, result));
     });
 }
 
 fn poll_mesh_rebuilds(
     mut queue: ResMut<MeshRebuildQueue>,
+    world: Res<VoxelWorld>,
     mut meshes: ResMut<Assets<Mesh>>,
     mesh_query: Query<(&Mesh3d, &FaceGroup), With<WorldMesh>>,
 ) {
-    let Ok(result) = queue.receiver.lock().unwrap().try_recv() else { return; };
+    let Ok((revision, result)) = queue.receiver.lock().unwrap().try_recv() else { return; };
+    if revision != world.revision {
+        queue.running = false;
+        queue_mesh_rebuild(&world, &mut queue);
+        return;
+    }
     for (handle, group) in mesh_query.iter() {
         let mesh = match group {
             FaceGroup::GrassTop => &result[0],
