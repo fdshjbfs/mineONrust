@@ -2,6 +2,7 @@ use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::asset::{LoadState, RenderAssetUsages};
+use bevy::pbr::DistanceFog;
 use bevy::window::{CursorGrabMode, CursorOptions, MonitorSelection, WindowMode};
 use std::sync::{mpsc, Mutex};
 use std::sync::mpsc::{Receiver, Sender};
@@ -190,7 +191,11 @@ fn setup(
     }
 
     let spawn_height = terrain_height(world.seed, WORLD_SIZE / 2, WORLD_SIZE / 2) + 3;
-    let camera = commands.spawn((Camera3d::default(), Projection::Perspective(PerspectiveProjection { far: 220.0, ..default() }), Player, Transform::from_xyz(WORLD_SIZE as f32 / 2.0, spawn_height as f32, WORLD_SIZE as f32 / 2.0))).id();
+    let camera = commands.spawn((Camera3d::default(), Projection::Perspective(PerspectiveProjection { far: 220.0, ..default() }), DistanceFog {
+        color: Color::srgb(0.34, 0.66, 0.94),
+        falloff: FogFalloff::Linear { start: 80.0, end: 220.0 },
+        ..default()
+    }, Player, Transform::from_xyz(WORLD_SIZE as f32 / 2.0, spawn_height as f32, WORLD_SIZE as f32 / 2.0))).id();
     commands.spawn((Camera2d, Camera { order: 1, clear_color: ClearColorConfig::None, ..default() }));
     commands.entity(camera).with_children(|parent| {
         parent.spawn((Mesh3d(meshes.add(Cuboid::new(0.20, 0.20, 0.55))), MeshMaterial3d(materials.add(StandardMaterial {
@@ -203,7 +208,8 @@ fn setup(
         commands.spawn((Text::new("+"), TextFont { font_size: 18.0, ..default() }, TextColor(Color::WHITE),
             Node { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Percent(50.0), margin: UiRect::new(Val::Px(-4.0), Val::Auto, Val::Px(-9.0), Val::Auto), ..default() }));
         commands.spawn((Text::new("[1 DIRT:16] [2 STONE:0]  3  4  5  6  7  8  9"), TextFont { font_size: 20.0, ..default() }, TextColor(Color::WHITE), Hotbar,
-            Node { position_type: PositionType::Absolute, left: Val::Percent(31.0), bottom: Val::Px(24.0), ..default() }));
+            Node { position_type: PositionType::Absolute, left: Val::Percent(31.0), bottom: Val::Px(24.0), padding: UiRect::axes(Val::Px(18.0), Val::Px(10.0)), border: UiRect::all(Val::Px(2.0)), ..default() },
+            BorderColor(Color::srgba(0.95, 0.78, 0.36, 0.9)), BackgroundColor(Color::srgba(0.04, 0.06, 0.10, 0.82))));
         commands.spawn((Text::new(""), TextFont { font_size: 16.0, ..default() }, TextColor(Color::srgb(1.0, 0.8, 0.25)), MiningProgressBar,
             Node { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Percent(54.0), margin: UiRect::new(Val::Px(-45.0), Val::Auto, Val::Px(-8.0), Val::Auto), ..default() }));
     commands.spawn((DirectionalLight { illuminance: 9_000.0, shadows_enabled: false, color: Color::srgb(1.0, 0.94, 0.82), ..default() },
