@@ -156,12 +156,12 @@ fn build_mesh(world: &VoxelWorld, group: FaceGroup) -> Mesh {
     let mut uvs = Vec::new();
     let mut indices = Vec::new();
     let faces: [([i32; 3], [[f32; 3]; 4]); 6] = [
-        ([0, 1, 0], [[0.,1.,0.],[1.,1.,0.],[1.,1.,1.],[0.,1.,1.]]),
-        ([0,-1, 0], [[0.,0.,1.],[1.,0.,1.],[1.,0.,0.],[0.,0.,0.]]),
-        ([1, 0, 0], [[1.,0.,0.],[1.,0.,1.],[1.,1.,1.],[1.,1.,0.]]),
-        ([-1,0, 0], [[0.,0.,1.],[0.,0.,0.],[0.,1.,0.],[0.,1.,1.]]),
-        ([0, 0, 1], [[1.,0.,1.],[0.,0.,1.],[0.,1.,1.],[1.,1.,1.]]),
-        ([0, 0,-1], [[0.,0.,0.],[1.,0.,0.],[1.,1.,0.],[0.,1.,0.]]),
+        ([0, 1, 0], [[0.,1.,0.],[0.,1.,1.],[1.,1.,1.],[1.,1.,0.]]),
+        ([0,-1, 0], [[0.,0.,0.],[1.,0.,0.],[1.,0.,1.],[0.,0.,1.]]),
+        ([1, 0, 0], [[1.,0.,0.],[1.,1.,0.],[1.,1.,1.],[1.,0.,1.]]),
+        ([-1,0, 0], [[0.,0.,1.],[0.,1.,1.],[0.,1.,0.],[0.,0.,0.]]),
+        ([0, 0, 1], [[1.,0.,1.],[1.,1.,1.],[0.,1.,1.],[0.,0.,1.]]),
+        ([0, 0,-1], [[0.,0.,0.],[0.,1.,0.],[1.,1.,0.],[1.,0.,0.]]),
     ];
     for x in 0..WORLD_SIZE { for y in 0..WORLD_HEIGHT { for z in 0..WORLD_SIZE {
         if world.get(x, y, z) == 0 { continue; }
@@ -170,10 +170,10 @@ fn build_mesh(world: &VoxelWorld, group: FaceGroup) -> Mesh {
             let face_group = if normal[1] > 0 { FaceGroup::Top } else if normal[1] < 0 { FaceGroup::Bottom } else { FaceGroup::Side };
             if std::mem::discriminant(&face_group) != std::mem::discriminant(&group) { continue; }
             let base = positions.len() as u32;
-            for corner in corners {
+            for (corner, uv) in corners.into_iter().zip([[0.,0.],[0.,1.],[1.,1.],[1.,0.]]) {
                 positions.push([x as f32 + corner[0], y as f32 + corner[1], z as f32 + corner[2]]);
                 normals.push([normal[0] as f32, normal[1] as f32, normal[2] as f32]);
-                uvs.push([corner[0], corner[2]]);
+                uvs.push(uv);
             }
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
