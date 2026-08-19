@@ -7,6 +7,7 @@ use bevy::window::{CursorGrabMode, CursorOptions};
 const WORLD_SIZE: i32 = 512;
 const WORLD_HEIGHT: i32 = 96;
 const SEA_LEVEL: i32 = 27;
+const RENDER_RADIUS: i32 = 160;
 const REACH: f32 = 7.0;
 
 #[derive(Resource)]
@@ -55,6 +56,13 @@ struct TextureHandles {
 #[derive(Resource, Default)]
 struct LookState { pitch: f32, yaw: f32 }
 
+#[derive(Resource)]
+struct PlayerState {
+    flying: bool,
+    velocity: Vec3,
+    last_space: f32,
+}
+
 fn index(x: i32, y: i32, z: i32) -> usize {
     ((y * WORLD_SIZE + z) * WORLD_SIZE + x) as usize
 }
@@ -80,12 +88,14 @@ fn main() {
     App::new()
         .insert_resource(VoxelWorld::new())
         .insert_resource(LookState::default())
+        .insert_resource(PlayerState { flying: false, velocity: Vec3::ZERO, last_space: -10.0 })
         .insert_resource(ClearColor(Color::srgb(0.34, 0.66, 0.94)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "mineONrust".into(),
                 resolution: (1280.0_f32, 720.0_f32).into(),
-                cursor_options: CursorOptions { grab_mode: CursorGrabMode::Locked, visible: false, ..default() },
+                cursor_options: CursorOptions { grab_mode: CursorGrabMode::Confined, visible: false, ..default() },
+                present_mode: bevy::window::PresentMode::AutoVsync,
                 ..default()
             }),
             ..default()
@@ -116,7 +126,7 @@ fn setup(
     }
 
     let spawn_height = terrain_height(WORLD_SIZE / 2, WORLD_SIZE / 2) + 3;
-    let camera = commands.spawn((Camera3d::default(), Player, Transform::from_xyz(WORLD_SIZE as f32 / 2.0, spawn_height as f32, WORLD_SIZE as f32 / 2.0))).id();
+    let camera = commands.spawn((Camera3d::default(), Projection::Perspective(PerspectiveProjection { far: 220.0, ..default() }), Player, Transform::from_xyz(WORLD_SIZE as f32 / 2.0, spawn_height as f32, WORLD_SIZE as f32 / 2.0))).id();
     commands.entity(camera).with_children(|parent| {
         parent.spawn((Mesh3d(meshes.add(Cuboid::new(0.20, 0.20, 0.55))), MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.73, 0.42, 0.25), perceptual_roughness: 0.9, ..default()
@@ -124,7 +134,7 @@ fn setup(
     });
     commands.spawn((Text::new("+"), TextFont { font_size: 24.0, ..default() }, TextColor(Color::WHITE),
         Node { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Percent(50.0), ..default() }));
-    commands.spawn((DirectionalLight { illuminance: 12_000.0, shadows_enabled: true, ..default() },
+    commands.spawn((DirectionalLight { illuminance: 12_000.0, shadows_enabled: false, ..default() },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.1, -0.8, 0.0))));
     commands.insert_resource(AmbientLight { color: Color::srgb(0.65, 0.75, 0.95), brightness: 0.65 });
 }
@@ -164,6 +174,8 @@ fn build_mesh(world: &VoxelWorld, group: FaceGroup) -> Mesh {
         ([0, 0,-1], [[0.,0.,0.],[0.,1.,0.],[1.,1.,0.],[1.,0.,0.]]),
     ];
     for x in 0..WORLD_SIZE { for y in 0..WORLD_HEIGHT { for z in 0..WORLD_SIZE {
+        let center = WORLD_SIZE / 2;
+        if (x - center).abs() > RENDER_RADIUS || (z - center).abs() > RENDER_RADIUS { continue; }
         if world.get(x, y, z) == 0 { continue; }
         for (normal, corners) in faces {
             if world.get(x + normal[0], y + normal[1], z + normal[2]) != 0 { continue; }
@@ -173,7 +185,7 @@ fn build_mesh(world: &VoxelWorld, group: FaceGroup) -> Mesh {
             for (corner, uv) in corners.into_iter().zip([[0.,0.],[0.,1.],[1.,1.],[1.,0.]]) {
                 positions.push([x as f32 + corner[0], y as f32 + corner[1], z as f32 + corner[2]]);
                 normals.push([normal[0] as f32, normal[1] as f32, normal[2] as f32]);
-                uvs.push(uv);
+                uvs.push(if group == FaceGroup::Side { [uv[0], 1.0 - uv[1]] } else { uv });
             }
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
@@ -195,8 +207,24 @@ fn mouse_look(mut motion: EventReader<MouseMotion>, mut look: ResMut<LookState>,
     transform.rotation = Quat::from_euler(EulerRot::YXZ, look.yaw, look.pitch, 0.0);
 }
 
-fn player_move(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut query: Query<&mut Transform, With<Player>>) {
+fn player_move(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    world: Res<VoxelWorld>,
+    mut state: ResMut<PlayerState>,
+    mut query: Query<&mut Transform, With<Player>>,
+) {
     let Ok(mut transform) = query.get_single_mut() else { return; };
+    let now = time.elapsed_secs();
+    if keys.just_pressed(KeyCode::Space) {
+        if now - state.last_space < 0.32 {
+            state.flying = !state.flying;
+            state.velocity = Vec3::ZERO;
+        } else if !state.flying && is_grounded(&world, transform.translation) {
+            state.velocity.y = 7.0;
+        }
+        state.last_space = now;
+    }
     let mut direction = Vec3::ZERO;
     let forward = transform.forward().with_y(0.0).normalize_or_zero();
     let right = transform.right().with_y(0.0).normalize_or_zero();
@@ -204,9 +232,46 @@ fn player_move(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut query: Quer
     if keys.pressed(KeyCode::KeyS) { direction -= forward; }
     if keys.pressed(KeyCode::KeyD) { direction += right; }
     if keys.pressed(KeyCode::KeyA) { direction -= right; }
-    if keys.pressed(KeyCode::Space) { direction.y += 1.0; }
-    if keys.pressed(KeyCode::ShiftLeft) { direction.y -= 1.0; }
-    transform.translation += direction.normalize_or_zero() * 14.0 * time.delta_secs();
+    if state.flying {
+        if keys.pressed(KeyCode::Space) { direction.y += 1.0; }
+        if keys.pressed(KeyCode::ShiftLeft) { direction.y -= 1.0; }
+        transform.translation += direction.normalize_or_zero() * 14.0 * time.delta_secs();
+        return;
+    }
+    state.velocity.y -= 22.0 * time.delta_secs();
+    let movement = direction.normalize_or_zero() * 6.0 * time.delta_secs();
+    move_with_collision(&world, &mut transform.translation, movement, &mut state.velocity);
+}
+
+fn is_solid(world: &VoxelWorld, position: Vec3) -> bool {
+    world.get(position.x.floor() as i32, position.y.floor() as i32, position.z.floor() as i32) != 0
+}
+
+fn is_grounded(world: &VoxelWorld, position: Vec3) -> bool {
+    is_solid(world, position - Vec3::Y * 1.72)
+}
+
+fn move_with_collision(world: &VoxelWorld, position: &mut Vec3, movement: Vec3, velocity: &mut Vec3) {
+    for (axis, amount) in [(0, movement.x), (1, movement.y), (2, movement.z)] {
+        let mut candidate = *position;
+        candidate[axis] += amount;
+        let samples = [
+            candidate + Vec3::new(-0.28, -1.7, -0.28),
+            candidate + Vec3::new(0.28, -1.7, -0.28),
+            candidate + Vec3::new(-0.28, 0.0, 0.28),
+            candidate + Vec3::new(0.28, 0.0, 0.28),
+        ];
+        if samples.iter().all(|sample| !is_solid(world, *sample)) {
+            *position = candidate;
+        } else if axis == 1 {
+            if amount < 0.0 {
+                position.y = (candidate.y - 1.7).floor() + 2.701;
+            }
+            *velocity = velocity.with_y(0.0);
+        } else {
+            *velocity = if axis == 0 { velocity.with_x(0.0) } else { velocity.with_z(0.0) };
+        }
+    }
 }
 
 fn block_interaction(
