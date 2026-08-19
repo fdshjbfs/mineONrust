@@ -3,6 +3,9 @@ use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::asset::{LoadState, RenderAssetUsages};
 use bevy::window::{CursorGrabMode, CursorOptions};
+use std::sync::{mpsc, Mutex};
+use std::sync::mpsc::{Receiver, Sender};
+use std::thread;
 
 const WORLD_SIZE: i32 = 512;
 const WORLD_HEIGHT: i32 = 96;
@@ -30,7 +33,10 @@ impl VoxelWorld {
                 let height = terrain_height(x, z);
                 for y in 0..=height {
                     let is_cave = y > 7 && y < height - 4 && cave_value(x, y, z) > 0.72;
-                    if !is_cave { set_block(&mut blocks, x, y, z, if y == height { GRASS } else if y > height - 4 { DIRT } else { STONE }); }
+                    if !is_cave {
+                        let mountain_surface = height > SEA_LEVEL + 24;
+                        set_block(&mut blocks, x, y, z, if y == height && !mountain_surface { GRASS } else if y > height - 4 && !mountain_surface { DIRT } else { STONE });
+                    }
                 }
             }
         }
@@ -83,6 +89,19 @@ struct MiningState { target: Option<IVec3>, progress: f32 }
 #[derive(Component)]
 struct Hotbar;
 
+#[derive(Component)]
+struct MiningProgressBar;
+
+#[derive(Component)]
+struct BreakParticle { velocity: Vec3, lifetime: f32 }
+
+#[derive(Resource)]
+struct MeshRebuildQueue {
+    sender: Sender<[Mesh; 4]>,
+    receiver: Mutex<Receiver<[Mesh; 4]>>,
+    running: bool,
+}
+
 fn index(x: i32, y: i32, z: i32) -> usize {
     ((y * WORLD_SIZE + z) * WORLD_SIZE + x) as usize
 }
@@ -104,11 +123,13 @@ fn cave_value(x: i32, y: i32, z: i32) -> f32 {
 }
 
 fn terrain_height(x: i32, z: i32) -> i32 {
-    let continental = ((x as f32 * 0.006).sin() + (z as f32 * 0.007).cos()) * 9.0;
-    let hills = (x as f32 * 0.022).sin() * (z as f32 * 0.019).cos() * 13.0;
-    let ridge = ((x as f32 * 0.014).sin() - (z as f32 * 0.017).cos()).abs() * 19.0;
-    let detail = (hash(x / 3, z / 3) - 0.5) * 4.0;
-    (SEA_LEVEL + 8 + continental as i32 + hills as i32 + ridge as i32 + detail as i32).clamp(4, WORLD_HEIGHT - 4)
+    let region = hash(x / 96, z / 96);
+    let broad = ((x as f32 * 0.004).sin() + (z as f32 * 0.005).cos()) * 2.5;
+    let hills = (x as f32 * 0.018).sin() * (z as f32 * 0.016).cos() * 3.0;
+    let mountain_noise = ((x as f32 * 0.009).sin() - (z as f32 * 0.011).cos()).abs();
+    let mountains = if region > 0.66 { mountain_noise.powf(1.7) * 28.0 } else { 0.0 };
+    let detail = (hash(x / 8, z / 8) - 0.5) * 1.8;
+    (SEA_LEVEL + 8 + broad as i32 + hills as i32 + mountains as i32 + detail as i32).clamp(4, WORLD_HEIGHT - 4)
 }
 
 fn main() {
@@ -118,6 +139,7 @@ fn main() {
         .insert_resource(PlayerState { flying: false, velocity: Vec3::ZERO, last_space: -10.0 })
         .insert_resource(Inventory { slots: [16, 0, 0, 0, 0, 0, 0, 0, 0], selected: 0 })
         .insert_resource(MiningState::default())
+        .insert_resource({ let (sender, receiver) = mpsc::channel(); MeshRebuildQueue { sender, receiver: Mutex::new(receiver), running: false } })
         .insert_resource(ClearColor(Color::srgb(0.34, 0.66, 0.94)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -130,7 +152,7 @@ fn main() {
             ..default()
         }))
         .add_systems(Startup, setup)
-        .add_systems(Update, (report_texture_status, mouse_look, player_move, hotbar_input, block_interaction, update_hotbar).chain())
+        .add_systems(Update, (report_texture_status, mouse_look, player_move, hotbar_input, block_interaction, update_hotbar, update_mining_ui, update_particles, poll_mesh_rebuilds).chain())
         .run();
 }
 
@@ -163,10 +185,12 @@ fn setup(
             base_color: Color::srgb(0.73, 0.42, 0.25), perceptual_roughness: 0.9, ..default()
         })), Transform::from_xyz(0.42, -0.34, -0.72)));
     });
-    commands.spawn((Text::new("+"), TextFont { font_size: 24.0, ..default() }, TextColor(Color::WHITE),
-        Node { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Percent(50.0), ..default() }));
-    commands.spawn((Text::new("1 DIRT  2 STONE"), TextFont { font_size: 20.0, ..default() }, TextColor(Color::WHITE), Hotbar,
-        Node { position_type: PositionType::Absolute, left: Val::Percent(42.0), bottom: Val::Px(24.0), ..default() }));
+        commands.spawn((Text::new("+"), TextFont { font_size: 18.0, ..default() }, TextColor(Color::WHITE),
+            Node { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Percent(50.0), margin: UiRect::new(Val::Px(-4.0), Val::Auto, Val::Px(-9.0), Val::Auto), ..default() }));
+        commands.spawn((Text::new("[1 DIRT:16] [2 STONE:0]  3  4  5  6  7  8  9"), TextFont { font_size: 20.0, ..default() }, TextColor(Color::WHITE), Hotbar,
+            Node { position_type: PositionType::Absolute, left: Val::Percent(31.0), bottom: Val::Px(24.0), ..default() }));
+        commands.spawn((Text::new(""), TextFont { font_size: 16.0, ..default() }, TextColor(Color::srgb(1.0, 0.8, 0.25)), MiningProgressBar,
+            Node { position_type: PositionType::Absolute, left: Val::Percent(50.0), top: Val::Percent(54.0), margin: UiRect::new(Val::Px(-45.0), Val::Auto, Val::Px(-8.0), Val::Auto), ..default() }));
     commands.spawn((DirectionalLight { illuminance: 9_000.0, shadows_enabled: false, color: Color::srgb(1.0, 0.94, 0.82), ..default() },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.1, -0.8, 0.0))));
     commands.spawn((DirectionalLight { illuminance: 4_000.0, shadows_enabled: false, color: Color::srgb(0.58, 0.72, 1.0), ..default() },
@@ -351,7 +375,31 @@ fn update_hotbar(inventory: Res<Inventory>, mut query: Query<&mut Text, With<Hot
     for mut text in &mut query { *text = Text::new(labels.join(" ")); }
 }
 
+fn update_mining_ui(mining: Res<MiningState>, mut query: Query<&mut Text, With<MiningProgressBar>>) {
+    if !mining.is_changed() { return; }
+    let text = if mining.target.is_some() {
+        let filled = (mining.progress * 12.0).clamp(0.0, 12.0) as usize;
+        format!("CRACKS [{}{}]", "#".repeat(filled), "-".repeat(12 - filled))
+    } else { String::new() };
+    for mut label in &mut query { *label = Text::new(text.clone()); }
+}
+
+fn update_particles(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut query: Query<(Entity, &mut Transform, &mut BreakParticle)>,
+) {
+    for (entity, mut transform, mut particle) in &mut query {
+        particle.lifetime -= time.delta_secs();
+        transform.translation += particle.velocity * time.delta_secs();
+        particle.velocity.y -= 12.0 * time.delta_secs();
+        transform.scale *= 0.985;
+        if particle.lifetime <= 0.0 { commands.entity(entity).despawn(); }
+    }
+}
+
 fn block_interaction(
+    mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
     camera: Query<&GlobalTransform, With<Player>>,
     mut world: ResMut<VoxelWorld>,
@@ -359,7 +407,8 @@ fn block_interaction(
     mut mining: ResMut<MiningState>,
     time: Res<Time>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mesh_query: Query<(&Mesh3d, &FaceGroup), With<WorldMesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut rebuild_queue: ResMut<MeshRebuildQueue>,
 ) {
     let Ok(transform) = camera.get_single() else { return; };
     let origin = transform.translation();
@@ -383,7 +432,7 @@ fn block_interaction(
                 world.blocks[index(place.x, place.y, place.z)] = selected_block;
                 let selected_slot = inventory.selected;
                 inventory.slots[selected_slot] -= 1;
-                rebuild_meshes(&world, &mut meshes, &mesh_query);
+                queue_mesh_rebuild(&world, &mut rebuild_queue);
             }
         }
         return;
@@ -406,16 +455,48 @@ fn block_interaction(
         }
         mining.target = None;
         mining.progress = 0.0;
-        rebuild_meshes(&world, &mut meshes, &mesh_query);
+        let particle_material = materials.add(StandardMaterial { base_color: Color::srgb(0.45, 0.30, 0.18), unlit: true, ..default() });
+        for particle_index in 0..8 {
+            let angle = particle_index as f32 * 0.78;
+            commands.spawn((Mesh3d(meshes.add(Cuboid::new(0.08, 0.08, 0.08))), MeshMaterial3d(particle_material.clone()),
+                Transform::from_translation(target.as_vec3() + Vec3::splat(0.5)),
+                BreakParticle { velocity: Vec3::new(angle.cos() * 2.0, 2.5 + (particle_index % 3) as f32, angle.sin() * 2.0), lifetime: 0.45 }));
+        }
+        queue_mesh_rebuild(&world, &mut rebuild_queue);
     }
 }
 
-fn rebuild_meshes(
-    world: &VoxelWorld,
-    meshes: &mut Assets<Mesh>,
-    mesh_query: &Query<(&Mesh3d, &FaceGroup), With<WorldMesh>>,
+fn queue_mesh_rebuild(world: &VoxelWorld, queue: &mut MeshRebuildQueue) {
+    if queue.running { return; }
+    queue.running = true;
+    let blocks = world.blocks.clone();
+    let sender = queue.sender.clone();
+    thread::spawn(move || {
+        let background_world = VoxelWorld { blocks };
+        let result = [
+            build_mesh(&background_world, FaceGroup::GrassTop),
+            build_mesh(&background_world, FaceGroup::GrassSide),
+            build_mesh(&background_world, FaceGroup::Dirt),
+            build_mesh(&background_world, FaceGroup::Stone),
+        ];
+        let _ = sender.send(result);
+    });
+}
+
+fn poll_mesh_rebuilds(
+    mut queue: ResMut<MeshRebuildQueue>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mesh_query: Query<(&Mesh3d, &FaceGroup), With<WorldMesh>>,
 ) {
+    let Ok(result) = queue.receiver.lock().unwrap().try_recv() else { return; };
     for (handle, group) in mesh_query.iter() {
-        if let Some(mesh) = meshes.get_mut(&handle.0) { *mesh = build_mesh(world, *group); }
+        let mesh = match group {
+            FaceGroup::GrassTop => &result[0],
+            FaceGroup::GrassSide => &result[1],
+            FaceGroup::Dirt => &result[2],
+            FaceGroup::Stone => &result[3],
+        };
+        if let Some(asset) = meshes.get_mut(&handle.0) { *asset = mesh.clone(); }
     }
+    queue.running = false;
 }
